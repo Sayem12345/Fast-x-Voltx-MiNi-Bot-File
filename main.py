@@ -62,6 +62,7 @@ _tracked_msgs: dict[int, set[int]] = {}  # uid → set of msg_ids with buttons
 _active_tasks: dict[int, asyncio.Task] = {}  # key = row_id
 _active_stop: dict[int, asyncio.Event] = {}  # key = row_id
 _number_msg_id: dict[int, int] = {}  # row_id → msg_id of that number's waiting message
+_last_country: dict[int, dict] = {}  # uid → {country_id, cflag, cname}
 
 
 async def _rm_buttons(uid, context):
@@ -401,7 +402,7 @@ def _clean(num):
 def _sms_buttons():
     return [
         [
-            InlineKeyboardButton("🔢 New Number", callback_data="btn_new"),
+            InlineKeyboardButton("Get Number", callback_data="btn_new"),
             InlineKeyboardButton("📨 OTP Group", url="https://t.me/seven_otp"),
         ],
         [InlineKeyboardButton("🌍 Change Country", callback_data="btn_chg")],
@@ -652,30 +653,37 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         active = get_user_active(uid)
         if active:
             cid = active["country_id"]
-            conn = _conn()
-            c = conn.execute("SELECT * FROM countries WHERE id=? AND is_active=1", (cid,)).fetchone()
-            conn.close()
-            if c:
-                load_msg = await q.message.reply_text(f"⏳ Getting number from {c['flag']} {c['name']}...")
-                num = await api_getnum(c["range_id"])
-                if num:
-                    row_id = store_number(uid, cid, num)
-                    _start_task(uid, row_id, context)
-                    flag = c["flag"] or ""
-                    name = c["name"]
-                    number = _clean(num.get("full_number", ""))
-                    text = f"☎️ {flag} {name} | <code>{number}</code> | 🔑 | -----"
-                    await load_msg.edit_text(
-                        text, reply_markup=InlineKeyboardMarkup(_sms_buttons()), parse_mode="HTML"
-                    )
-                    _track_msg(uid, load_msg.message_id)
-                    _number_msg_id[row_id] = load_msg.message_id
-                    return
-                await load_msg.edit_text("❌ No numbers available. Try another country.")
-                _track_msg(uid, load_msg.message_id)
-                return
-        msg = await show_countries_edit(q.message)
-        _track_msg(uid, msg.message_id)
+        elif uid in _last_country:
+            cid = _last_country[uid]["country_id"]
+        else:
+            await q.message.reply_text("❌ No country data available. Please start over.")
+            return
+        conn = _conn()
+        c = conn.execute("SELECT * FROM countries WHERE id=? AND is_active=1", (cid,)).fetchone()
+        conn.close()
+        if not c:
+            await q.message.reply_text("❌ Country unavailable.")
+            return
+        load_msg = await q.message.reply_text(f"⏳ Getting number from {c['flag']} {c['name']}...")
+        num = await api_getnum(c["range_id"])
+        if not num:
+            await load_msg.edit_text(
+                "❌ No numbers available. Try another country.",
+                reply_markup=InlineKeyboardMarkup([[_back_btn("back_start")]])
+            )
+            _track_msg(uid, load_msg.message_id)
+            return
+        row_id = store_number(uid, cid, num)
+        _start_task(uid, row_id, context)
+        flag = c["flag"] or ""
+        name = c["name"]
+        number = _clean(num.get("full_number", ""))
+        text = f"☎️ {flag} {name} | <code>{number}</code> | 🔑 | -----"
+        await load_msg.edit_text(
+            text, reply_markup=InlineKeyboardMarkup(_sms_buttons()), parse_mode="HTML"
+        )
+        _track_msg(uid, load_msg.message_id)
+        _number_msg_id[row_id] = load_msg.message_id
         return
 
     if data == "btn_chg":
@@ -871,6 +879,7 @@ async def _poll_number_task(uid: int, row_id: int, stop: asyncio.Event, context:
                     if matched:
                         logger.info("OTP match row_id=%s api=%s number=%s", row_id, api_id, hit_num)
                         mark_otp(row_id, otp_code)
+                        _last_country[uid] = {"country_id": row["country_id"], "cflag": row["cflag"], "cname": row["cname"]}
                         display = hide_number(full, _brand()) if _num_hide() else full
                         otp_text_user = f"✅ {row['cflag']} {row['cname']} | <code>{full}</code> | 🔑 | <code>{otp_code}</code>"
                         otp_text_group = f"✅ {row['cflag']} {row['cname']} | <code>{display}</code> | 🔑 | <code>{otp_code}</code>"
@@ -921,6 +930,7 @@ async def _poll_number_task(uid: int, row_id: int, stop: asyncio.Event, context:
                         if nat7 in hit_range or full9 in hit_range:
                             logger.info("Console match row_id=%s range=%s", row_id, hit_range)
                             mark_otp(row_id, otp_code)
+                            _last_country[uid] = {"country_id": row["country_id"], "cflag": row["cflag"], "cname": row["cname"]}
                             clean_full = _clean(row["full_number"])
                             display = hide_number(clean_full, _brand()) if _num_hide() else clean_full
                             otp_text_user = f"✅ {row['cflag']} {row['cname']} | <code>{clean_full}</code> | 🔑 | <code>{otp_code}</code>"
